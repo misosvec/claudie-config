@@ -2,9 +2,7 @@ terraform {
   required_providers {
     cloudrift = {
       source = "berops/vastai"
-#      version = "~> 0.2.6"
+#      version = "~> 0.1.0"
     }
   }
 }
-
-# TODO, add version field
