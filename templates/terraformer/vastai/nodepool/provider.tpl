@@ -11,6 +11,6 @@ provider "vastai" {
 {{- if $nodepool.Details.Provider.GetVastai.TeamApiKey }}
 provider "vastai" {
   api_key = "{{ $nodepool.Details.Provider.GetVastai.TeamApiKey }}"
-  alias = "nodepool_{{ $resourceSuffix }}_terminal"
+  alias = "nodepool_{{ $resourceSuffix }}_team"
 }
 {{- end }}

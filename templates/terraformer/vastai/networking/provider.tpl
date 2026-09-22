@@ -1,16 +1,15 @@
-{{- $nodepool          := .Data.NodePool }}
-{{- $specName          := $nodepool.Details.Provider.SpecName }}
+{{- $specName          := .Data.Provider.SpecName }}
 {{- $uniqueFingerPrint := .Fingerprint }}
 {{- $resourceSuffix    := printf "%s_%s" $specName $uniqueFingerPrint }}
 
 provider "vastai" {
   api_key = file("{{ $specName }}")
-  alias = "nodepool_{{ $resourceSuffix }}_personal"
+  alias = "networking_{{ $resourceSuffix }}_personal"
 }
 
-{{- if $nodepool.Details.Provider.GetVastai.TeamApiKey }}
+{{- if .Data.Provider.GetVastai.TeamApiKey }}
 provider "vastai" {
-  api_key = "{{ $nodepool.Details.Provider.GetVastai.TeamApiKey }}"
-  alias = "nodepool_{{ $resourceSuffix }}_terminal"
+  api_key = "{{ .Data.Provider.GetVastai.TeamApiKey }}"
+  alias = "networking_{{ $resourceSuffix }}_team"
 }
 {{- end }}
