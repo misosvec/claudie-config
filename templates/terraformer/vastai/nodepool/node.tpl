@@ -5,85 +5,116 @@
 {{- $isLoadbalancerCluster := eq .Data.ClusterData.ClusterType "LB" }}
 
 
-{{- $nodepool       := .Data.NodePool }}
-{{- $specName       := $nodepool.Details.Provider.SpecName }}
-{{- $resourceSuffix := printf "%s_%s" $specName $uniqueFingerPrint }}
-{{- $networking     := .Data.Networking.All }}
-{{- $claudieSshPort := index $networking (printf "claudie_ssh_port_%s" $resourceSuffix) }}
-{{- $firewallScript := index $networking (printf "cloudrift_firewall_script_%s" $resourceSuffix) }}
+{{- $nodepool        := .Data.NodePool }}
+{{- $specName        := $nodepool.Details.Provider.SpecName }}
+{{- $resourceSuffix  := printf "%s_%s" $specName $uniqueFingerPrint }}
+{{- $networking      := .Data.Networking.All }}
+{{- $claudieSshPort  := index $networking (printf "claudie_ssh_port_%s" $resourceSuffix) }}
+{{- $bootstrapScript := index $networking (printf "vastai_bootstrap_script_%s" $resourceSuffix) }}
+{{- $firewallScript  := index $networking (printf "vastai_firewall_script_%s" $resourceSuffix) }}
 
 {{- if not $claudieSshPort }}{{ template "node.tpl: missing output 'claudie_ssh_port_<specName>_<fingerprint>' from the networking stage in .Networking.All" }}{{ end }}
-{{- if not $firewallScript }}{{ template "node.tpl: missing output 'cloudrift_firewall_script_<specName>_<fingerprint>' from the networking stage in .Networking.All" }}{{ end }}
+{{- if not $bootstrapScript }}{{ template "node.tpl: missing output 'vastai_bootstrap_script_<specName>_<fingerprint>' from the networking stage in .Networking.All" }}{{ end }}
+{{- if not $firewallScript }}{{ template "node.tpl: missing output 'vastai_firewall_script_<specName>_<fingerprint>' from the networking stage in .Networking.All" }}{{ end }}
+
+{{/*
+  Instances are rented with the team API key when one is configured, otherwise
+  with the personal key. The SSH key has to live on the same account, as Vast.ai
+  requires a key on the renting account before a VM can be created.
+*/}}
+{{- $account := "personal" }}
+{{- if $nodepool.Details.Provider.GetVastai.GetTeamApiKey }}{{ $account = "team" }}{{ end }}
+{{- $providerAlias := printf "vastai.nodepool_%s_%s" $resourceSuffix $account }}
+
+{{/*
+  Offers are one machine slot each, so every node needs its own. Request a few
+  more than the nodepool size so a slot taken between search and rent does not
+  starve the last nodes.
+*/}}
+{{- $nodeCount    := len $nodepool.Nodes }}
+{{- $offerLimit   := add $nodeCount 3 }}
+{{- $offersData   := printf "vm_offers_%s" $resourceSuffix }}
+{{- $offersLocal  := printf "local.vm_offers_%s" $resourceSuffix }}
+
+data "http" "{{ $offersData }}" {
+  url    = "https://console.vast.ai/api/v0/bundles/"
+  method = "POST"
+
+  request_headers = {
+    Authorization  = "Bearer ${trimspace(file("{{ $specName }}"))}"
+    "Content-Type" = "application/json"
+  }
+
+  request_body = jsonencode({
+    type        = "ondemand"
+    verified    = { eq = true }
+#   datacenter  = { eq = true }
+    rentable    = { eq = true }
+    rented      = { eq = false }
+    reliability = { gte = 0.92 }
+    vms_enabled = { eq = true }
+    num_gpus    = { eq = 1 }
+#   duration    = { gte = 2592000 }
+#   inet_down   = { gte = 300 }
+    disk_space  = { gte = {{ $nodepool.Details.StorageDiskSize }} }
+    limit       = {{ $offerLimit }}
+    order       = [["dph_total", "asc"]]
+  })
+}
+
+locals {
+  # Cheapest first, as ordered by the query above.
+  vm_offers_{{ $resourceSuffix }} = try(jsondecode(data.http.{{ $offersData }}.response_body).offers, [])
+}
 
 {{- $sshKeyResourceName := printf "key_%s_%s" $nodepool.Name $resourceSuffix }}
-{{- $sshKeyName         := printf "key-%s-%s-%s" $nodepool.Name $clusterHash $specName }}
 
 resource "vastai_ssh_key" "{{ $sshKeyResourceName }}" {
-  provider   = cloudrift.nodepool_{{ $resourceSuffix }}
-  name       = "{{ $sshKeyName }}"
+  provider   = {{ $providerAlias }}
   public_key = file("./{{ $nodepool.Name }}")
 }
 
-{{- range $node := $nodepool.Nodes }}
+{{- range $i, $node := $nodepool.Nodes }}
 
 {{- $serverResourceName := printf "%s_%s" $node.Name $resourceSuffix }}
 
-resource "cloudrift_virtual_machine" "{{ $serverResourceName }}" {
-  provider      = cloudrift.nodepool_{{ $resourceSuffix }}
-  name          = "{{ $node.Name }}"
-  recipe        = "{{ $nodepool.Details.Image }}"
-  datacenter    = "{{ $nodepool.Details.Region }}"
-  instance_type = "{{ $nodepool.Details.ServerType }}"
-  ssh_key_id    = cloudrift_ssh_key.{{ $sshKeyResourceName }}.id
-
-  metadata = {
-    startup_commands = base64encode(<<-SCRIPT
+resource "vastai_instance" "{{ $serverResourceName }}" {
+  provider       = {{ $providerAlias }}
+  depends_on     = [vastai_ssh_key.{{ $sshKeyResourceName }}]
+  # Node {{ $i }} takes the {{ $i }}-th cheapest offer. The offer id only matters at
+  # creation: the search re-runs on every plan and the cheapest offers change
+  # constantly, so without ignore_changes every reconcile would replace the VM.
+  id             = try({{ $offersLocal }}[{{ $i }}].id, null)
+  label          = "{{ $serverResourceName }}"
+  image          = "{{ $nodepool.Details.Image }}"
+  disk           = {{ $nodepool.Details.StorageDiskSize }}
+  cancel_unavail = true
+  vm             = true
+  runtype        = "ssh"
+  # Publish the Claudie SSH port and WireGuard on the host so the node is
+  # reachable through Vast.ai's NAT; the mapped host ports are read back from
+  # `ports` in the output below.
+  env            = "-p {{ $claudieSshPort }}:{{ $claudieSshPort }} -p 51820:51820/udp"
+  onstart        = <<-EOF
 #!/bin/bash
-# Enable root SSH access
-mkdir -p /root/.ssh
-chmod 700 /root/.ssh
-if [ -f /home/riftuser/.ssh/authorized_keys ]; then
-    sed -n 's/^.*ssh-rsa/ssh-rsa/p' /home/riftuser/.ssh/authorized_keys > /root/.ssh/authorized_keys
-    chmod 600 /root/.ssh/authorized_keys
-fi
-echo 'PermitRootLogin without-password' >> /etc/ssh/sshd_config
-echo 'PubkeyAuthentication yes' >> /etc/ssh/sshd_config
-echo 'PubkeyAcceptedKeyTypes=+ssh-rsa' >> /etc/ssh/sshd_config
-# Configure SSH port
-echo "Port {{ $claudieSshPort }}" >> /etc/ssh/sshd_config
-mkdir -p /etc/systemd/system/ssh.socket.d
-cat <<SSHEOF > /etc/systemd/system/ssh.socket.d/override.conf
-[Socket]
-ListenStream=
-ListenStream=0.0.0.0:{{ $claudieSshPort }}
-SSHEOF
-systemctl daemon-reload
-systemctl restart ssh.socket
-sshd_active=$(systemctl is-active sshd 2>/dev/null || true)
-ssh_active=$(systemctl is-active ssh 2>/dev/null || true)
-if [ "$sshd_active" = "active" ]; then
-    systemctl restart sshd
-fi
-if [ "$ssh_active" = "active" ]; then
-    systemctl restart ssh
-fi
+{{ $bootstrapScript }}
 
-# Fix NAT hairpinning - allow node to reach its own public IP
-PUBLIC_IP=$(curl -4 -s --connect-timeout 5 ifconfig.me)
-PRIVATE_IP=$(ip route get 1.1.1.1 | awk '{print $7; exit}')
-if [ -n "$PUBLIC_IP" ] && [ -n "$PRIVATE_IP" ]; then
-    iptables -t nat -A OUTPUT -d "$PUBLIC_IP" -j DNAT --to-destination "$PRIVATE_IP"
-fi
-
-# Configure iptables firewall (not UFW — KubeOne disables UFW)
+# Configure iptables firewall (not UFW, KubeOne disables UFW)
 {{ $firewallScript }}
-{{- if $isKubernetesCluster }}
 
-# Create longhorn volume directory
+{{- if $isKubernetesCluster }}
+# Longhorn data directory on the OS disk. Vast.ai exposes no separate volume
+# to attach to a VM here, so data shares the OS disk sized by storageDiskSize.
 mkdir -p /opt/claudie/data
 {{- end }}{{/* if $isKubernetesCluster */}}
-SCRIPT
-    )
+EOF
+
+  lifecycle {
+    ignore_changes = [id]
+    precondition {
+      condition     = length({{ $offersLocal }}) > {{ $i }}
+      error_message = "Vast.ai returned ${length({{ $offersLocal }})} matching VM offers, but nodepool {{ $nodepool.Name }} needs at least {{ add $i 1 }} (requested {{ $offerLimit }}) to place node {{ $node.Name }}."
+    }
   }
 }
 
@@ -91,25 +122,18 @@ SCRIPT
 
 # Output: [public_ip, ssh_port, wireguard_port] per node.
 #
-# CloudRift's port_mappings entries are {host_port, guest_port} where, despite the
-# names, host_port is the IN-VM service port (22, 80, 443, ...) and guest_port is
-# the externally reachable port on the SHARED public IP (e.g. 60002). So to reach
-# the VM's SSH (in-VM port = claudie_ssh_port) we connect to the public IP on the
-# matching guest_port. CloudRift forwards a fixed set of in-VM ports (22/80/443/
-# 8080/8443); WireGuard's 51820 is NOT forwarded, so it falls back to 51820 and the
-# node relies on initiating the tunnel outbound (PersistentKeepalive).
-#
-# Dedicated-IP instances have empty port_mappings, so both ports fall back to the
-# in-VM listen ports reached directly on the public IP.
+# Vast.ai VMs sit behind the host's NAT on a shared public IP. `ports` maps each
+# published in-VM port ("<port>/<proto>") to the host port it is reachable on, so
+# SSH is the host port mapped to <claudie_ssh_port>/tcp and WireGuard the host
+# port mapped to 51820/udp. If a mapping is missing the in-VM port is used as-is.
 output "{{ $nodepool.Name }}_{{ $specName }}_{{ $uniqueFingerPrint }}" {
   value = {
     {{- range $node := $nodepool.Nodes }}
     {{- $serverResourceName := printf "%s_%s" $node.Name $resourceSuffix }}
-    {{- $portMappings := printf "cloudrift_virtual_machine.%s.port_mappings" $serverResourceName }}
     "{{ $node.Name }}" = [
-      cloudrift_virtual_machine.{{ $serverResourceName }}.public_ip,
-      tostring(coalesce(one([for m in ({{ $portMappings }} == null ? [] : {{ $portMappings }}) : m.guest_port if m.host_port == {{ $claudieSshPort }}]), {{ $claudieSshPort }})),
-      tostring(coalesce(one([for m in ({{ $portMappings }} == null ? [] : {{ $portMappings }}) : m.guest_port if m.host_port == 51820]), 51820)),
+      vastai_instance.{{ $serverResourceName }}.public_ipaddr,
+      tostring(try(vastai_instance.{{ $serverResourceName }}.ports["{{ $claudieSshPort }}/tcp"], {{ $claudieSshPort }})),
+      tostring(try(vastai_instance.{{ $serverResourceName }}.ports["51820/udp"], 51820)),
     ]
     {{- end }}
   }

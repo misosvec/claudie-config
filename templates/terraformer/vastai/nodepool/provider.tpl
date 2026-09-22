@@ -8,9 +8,9 @@ provider "vastai" {
   alias = "nodepool_{{ $resourceSuffix }}_personal"
 }
 
-{{- if $nodepool.Details.Provider.GetVastai.TeamApiKey }}
+{{- with $nodepool.Details.Provider.GetVastai.GetTeamApiKey }}
 provider "vastai" {
-  api_key = "{{ $nodepool.Details.Provider.GetVastai.TeamApiKey }}"
+  api_key = "{{ . }}"
   alias = "nodepool_{{ $resourceSuffix }}_team"
 }
 {{- end }}

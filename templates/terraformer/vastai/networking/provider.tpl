@@ -7,9 +7,9 @@ provider "vastai" {
   alias = "networking_{{ $resourceSuffix }}_personal"
 }
 
-{{- if .Data.Provider.GetVastai.TeamApiKey }}
+{{- with .Data.Provider.GetVastai.GetTeamApiKey }}
 provider "vastai" {
-  api_key = "{{ .Data.Provider.GetVastai.TeamApiKey }}"
+  api_key = "{{ . }}"
   alias = "networking_{{ $resourceSuffix }}_team"
 }
 {{- end }}
