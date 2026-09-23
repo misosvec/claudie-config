@@ -82,7 +82,7 @@ data "http" "{{ $offersData }}" {
     static_ip		= { eq = true }
     num_gpus    	= { eq = {{ $nodepool.Details.MachineSpec.NvidiaGpuCount }} }
     gpu_name    	= { eq = "{{ $nodepool.Details.MachineSpec.NvidiaGpuType }}"}
-    total_gpu_ram   = { gte = {{ $nodepool.Details.MachineSpec.Memory }} }
+    gpu_total_ram   = { gte = {{ $nodepool.Details.MachineSpec.Memory }} }
     cpu_cores 		= { gte = {{ $nodepool.Details.MachineSpec.CpuCount }} }
     disk_space 		= { gte = {{ $nodepool.Details.StorageDiskSize }} }
     geolocation 	= { in = local.geolocations }
