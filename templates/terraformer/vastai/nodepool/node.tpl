@@ -71,10 +71,10 @@ data "http" "{{ $offersData }}" {
     "Content-Type" = "application/json"
   }
 
+# often getting empty offers when datacenter = { eq = true }
   request_body = jsonencode({
     type        	= "ondemand"
     verified    	= { eq = true }
-    datacenter 		= { eq = true }
     rentable    	= { eq = true }
     rented      	= { eq = false }
     reliability 	= { gte = 0.98 }
