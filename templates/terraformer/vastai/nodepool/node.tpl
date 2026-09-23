@@ -19,12 +19,17 @@
 
 {{/*
   Instances are rented with the team API key when one is configured, otherwise
-  with the personal key. The SSH key has to live on the same account, as Vast.ai
-  requires a key on the renting account before a VM can be created.
+  with the personal key.
+
+  SSH keys are always created with the personal key. Vast.ai does not support
+  SSH keys on a team account: creating one in team context is rejected with
+  `team_ssh_keys_not_supported`. Keys are held per user, and a key registered
+  by a team member applies to the instances rented under that team.
 */}}
 {{- $account := "personal" }}
 {{- if $nodepool.Details.Provider.GetVastai.GetTeamApiKey }}{{ $account = "team" }}{{ end }}
-{{- $providerAlias := printf "vastai.nodepool_%s_%s" $resourceSuffix $account }}
+{{- $teamOrPersonalAlias := printf "vastai.nodepool_%s_%s" $resourceSuffix $account }}
+{{- $personalAlias := printf "vastai.nodepool_%s_personal" $resourceSuffix }}
 
 {{/*
   Offers are one machine slot each, so every node needs its own. Request a few
@@ -32,7 +37,7 @@
   starve the last nodes.
 */}}
 {{- $nodeCount    := len $nodepool.Nodes }}
-{{- $offerLimit   := add $nodeCount 3 }}
+{{- $offerLimit   := add $nodeCount 5 }}
 {{- $offersData   := printf "vm_offers_%s" $resourceSuffix }}
 {{- $offersLocal  := printf "local.vm_offers_%s" $resourceSuffix }}
 
@@ -70,7 +75,7 @@ locals {
 {{- $sshKeyResourceName := printf "key_%s_%s" $nodepool.Name $resourceSuffix }}
 
 resource "vastai_ssh_key" "{{ $sshKeyResourceName }}" {
-  provider   = {{ $providerAlias }}
+  provider   = {{ $personalAlias }}
   public_key = file("./{{ $nodepool.Name }}")
 }
 
@@ -78,12 +83,12 @@ resource "vastai_ssh_key" "{{ $sshKeyResourceName }}" {
 
 {{- $serverResourceName := printf "%s_%s" $node.Name $resourceSuffix }}
 
+# Node i takes the i-th cheapest offer. The offer id only matters at
+# creation: the search re-runs on every plan and the cheapest offers change
+# constantly, so without ignore_changes every reconcile would replace the VM.
 resource "vastai_instance" "{{ $serverResourceName }}" {
-  provider       = {{ $providerAlias }}
+  provider       = {{ $teamOrPersonalAlias }}
   depends_on     = [vastai_ssh_key.{{ $sshKeyResourceName }}]
-  # Node {{ $i }} takes the {{ $i }}-th cheapest offer. The offer id only matters at
-  # creation: the search re-runs on every plan and the cheapest offers change
-  # constantly, so without ignore_changes every reconcile would replace the VM.
   id             = try({{ $offersLocal }}[{{ $i }}].id, null)
   label          = "{{ $serverResourceName }}"
   image          = "{{ $nodepool.Details.Image }}"
