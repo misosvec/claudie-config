@@ -16,7 +16,8 @@
 
 
 locals {
-  claudie_ssh_port_{{ $resourceSuffix }} = 22522
+  claudie_ssh_port_{{ $resourceSuffix }}       = 22522
+  claudie_wireguard_port_{{ $resourceSuffix }} = 51820
 
   # Cloud-init bootstrap shared by every OVH instance in this cluster: enable
   # root SSH from the ubuntu/debian default user and move sshd to the Claudie
@@ -55,7 +56,7 @@ iptables -A INPUT -i lo -j ACCEPT
 # Allow SSH
 iptables -A INPUT -p tcp --dport ${local.claudie_ssh_port_{{ $resourceSuffix }}} -j ACCEPT
 # Allow WireGuard
-iptables -A INPUT -p udp --dport 51820 -j ACCEPT
+iptables -A INPUT -p udp --dport ${local.claudie_wireguard_port_{{ $resourceSuffix }}} -j ACCEPT
 {{- if $isKubernetesCluster }}
 {{-   if $K8sHasAPIServer }}
 # Allow K8s API server
@@ -87,6 +88,10 @@ FWSCRIPT
 
 output "claudie_ssh_port_{{ $resourceSuffix }}" {
   value = tostring(local.claudie_ssh_port_{{ $resourceSuffix }})
+}
+
+output "claudie_wireguard_port_{{ $resourceSuffix }}" {
+  value = tostring(local.claudie_wireguard_port_{{ $resourceSuffix }})
 }
 
 output "vastai_bootstrap_script_{{ $resourceSuffix }}" {
